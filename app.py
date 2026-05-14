@@ -116,9 +116,7 @@ else:
 
     if st.button("إرسال الإجابة"):
         if not name or not student_ans.strip():
-            st.error("يرجى ملء الاسم وكتابة الإجابة.")
-        elif len(student_ans.strip()) < 20:
-            st.warning("الإجابة قصيرة جداً.")
+            st.error("يرجى ملء الاسم وكتابة الإجابة.") 
         else:
             with st.spinner("جاري التحقق والتحليل..."):
                 try:
