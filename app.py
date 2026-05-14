@@ -1,10 +1,12 @@
 import streamlit as st 
 import google.genai as genai
 import json
-from sqlalchemy import create_engine, Table, Column, Integer, String, Text, Numeric, MetaData, insert
+from sqlalchemy import Numeric, create_engine, Table, Column, Integer, String, Text, MetaData, insert, select, UniqueConstraint
 import streamlit.components.v1 as components
+import pandas as pd
+from datetime import datetime
 
-# --- 1. إعدادات قاعدة البيانات (Supabase) ---
+# --- إعدادات قاعدة البيانات ---
 DB_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DB_URL)
 metadata = MetaData()
@@ -15,86 +17,131 @@ answers_table = Table(
     Column("student_name", String),
     Column("question_id", String),
     Column("answer_text", Text),
-    Column("ai_score", Numeric(10, 2)),
-    Column("submission_time", String) 
+    Column("ai_score", Numeric(5, 2)),
+    Column("submission_time", String),
+    UniqueConstraint('student_name', 'question_id', name='uix_student_question')
 )
 
-# --- 2. الدوال البرمجية (المحدثة للمكتبة الجديدة) ---
+# --- دالة التحقق من الـ AI ---
 def check_ai_content(text):
-    # استخدام العميل (Client) الجديد
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-    
-    prompt = f"""Analyze if this text is AI-generated or human-written. 
-    Return ONLY a valid JSON object like this: {{"score": 85}} 
-    where score is a number between 0 and 100 (100 means definitely AI). 
-    Text: {text}"""
-    
+    prompt = f"""Analyze if this text is AI-generated. Return ONLY a valid JSON: {{"score": 85}}. Text: {text}"""
     try:
-        # طريقة الاستدعاء الجديدة (تم تحديد الموديل الجديد gemini-2.5-flash)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        
-        # تنظيف النص من أي علامات Markdown
+        response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         return float(json.loads(clean_json).get("score", 0))
-        
-    except Exception as e:
-        st.error(f"خطأ في تحليل الذكاء الاصطناعي: {e}")
+    except:
         return 0.0
 
-# --- 3. واجهة المستخدم ---
-st.title("نظام استلام الإجابات")
+# ==========================================
+# --- تحديد الواجهة بناءً على الرابط ---
+# ==========================================
+role = st.query_params.get("role", "student")
 
-name = st.text_input("اسم الطالب")
-q_id = st.query_params.get("qid", "Default_Q")
-
-student_ans = st.text_area("اكتب إجابتك هنا بيدك:", height=200, key="answer_box")
-
-# محاولة حقن كود منع اللصق
-anti_paste_js = """
-<script>
-    var textareas = window.parent.document.querySelectorAll('textarea');
-    textareas.forEach(function(area) {
-        area.addEventListener('paste', function(e) {
-            e.preventDefault();
-            alert('عذراً، النسخ واللصق ممنوع!');
-        }, false);
-    });
-</script>
-"""
-components.html(anti_paste_js, height=0)
-
-# --- منطق الزر ---
-if st.button("إرسال الإجابة"):
-    if not name or not student_ans.strip():
-        st.error("يرجى ملء الاسم وكتابة الإجابة.")
-    elif len(student_ans.strip()) < 20:
-        st.warning("الإجابة قصيرة جداً، يرجى كتابة إجابة مفصلة.")
+if role == "teacher":
+    # ==========================================
+    # واجهة المدرس (لوحة التحكم)
+    # ==========================================
+    st.title("👨‍🏫 لوحة تحكم المدرس")
+    st.markdown("مرحباً بك. يمكنك هنا متابعة إجابات الطلاب ونسب الـ AI.")
+    
+    with engine.connect() as conn:
+        # جلب جميع البيانات مرتبة من الأحدث للأقدم
+        stmt = select(answers_table).order_by(answers_table.c.id.desc())
+        data = conn.execute(stmt).fetchall()
+        
+    if not data:
+        st.info("لا توجد إجابات مسجلة حتى الآن.")
     else:
-        with st.spinner("جاري تحليل الإجابة بواسطة Gemini 2.5 Flash وأرشفتها..."):
-            score = check_ai_content(student_ans)
+        # تحويل البيانات إلى DataFrame (جدول باندا)
+        df = pd.DataFrame(data, columns=["الرقم", "اسم الطالب", "رقم السؤال", "الإجابة", "نسبة AI %", "وقت التسليم"])
+        
+        # إضافة عمود حالة الاشتباه لتلوين الجدول
+        def get_status(score):
+            if score >= 70: return "⚠️ اشتباه عالي"
+            elif score >= 40: return "🟡 متوسط"
+            else: return "✅ آمن"
             
-            try:
-                from datetime import datetime
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                with engine.connect() as conn:
-                    stmt = insert(answers_table).values(
-                        student_name=name,
-                        question_id=q_id,
-                        answer_text=student_ans,
-                        ai_score=score,
-                        submission_time=current_time
-                    )
-                    conn.execute(stmt)
-                    conn.commit()
-                
-                if score > 70:
-                    st.warning(f"تم الاستلام يا {name}، ولكن نسبة الاشتباه في استخدام الذكاء الاصطناعي مرتفعة: {score}%")
-                else:
-                    st.success(f"تم الاستلام بنجاح يا {name}. نسبة الشك في الـ AI هي: {score}%")
-                    
-            except Exception as db_err:
-                st.error(f"حدث خطأ أثناء الحفظ في قاعدة البيانات: {db_err}")
+        df["الحالة"] = df["نسبة AI %"].apply(get_status)
+        
+        # فلاتر جانبية
+        st.sidebar.header("فلاتر البحث")
+        search_name = st.sidebar.text_input("بحث باسم الطالب:")
+        search_q = st.sidebar.selectbox("فلترة حسب السؤال:", ["الكل"] + df["رقم السؤال"].unique().tolist())
+        
+        # تطبيق الفلاتر
+        if search_name:
+            df = df[df["اسم الطالب"].str.contains(search_name, case=False)]
+        if search_q != "الكل":
+            df = df[df["رقم السؤال"] == search_q]
+            
+        # عرض الجدول
+        st.dataframe(
+            df[["اسم الطالب", "رقم السؤال", "نسبة AI %", "الحالة", "وقت التسليم"]], 
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # زر لتحميل التقرير كملف Excel/CSV
+        csv = df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 تحميل التقرير الكامل (CSV)",
+            data=csv,
+            file_name=f'teacher_report_{datetime.now().strftime("%Y%m%d")}.csv',
+            mime='text/csv'
+        )
+        
+        # عرض إجابة طالب محددة عند الضغط عليها
+        st.markdown("---")
+        st.subheader("تفاصيل إجابة طالب")
+        selected_student = st.selectbox("اختر طالب لرؤية إجابته كاملة:", df["اسم الطالب"].unique())
+        
+        student_data = df[df["اسم الطالب"] == selected_student].iloc[0]
+        st.info(f"**الطالب:** {student_data['اسم الطالب']}\n\n**السؤال:** {student_data['رقم السؤال']}\n\n**نسبة الـ AI:** {student_data['نسبة AI %']}%\n\n**الإجابة:**\n{student_data['الإجابة']}")
+
+else:
+    # ==========================================
+    # واجهة الطالب (الكود السابق)
+    # ==========================================
+    st.title("📝 نظام استلام الإجابات")
+
+    name = st.text_input("اسم الطالب")
+    q_id = st.query_params.get("qid", "Default_Q")
+
+    student_ans = st.text_area("اكتب إجابتك هنا بيدك:", height=200, key="answer_box")
+
+    # كود منع اللصق
+    anti_paste_js = """<script>var textareas = window.parent.document.querySelectorAll('textarea');textareas.forEach(function(area){area.addEventListener('paste',function(e){e.preventDefault();alert('النسخ ممنوع!');},false);});</script>"""
+    components.html(anti_paste_js, height=0)
+
+    if st.button("إرسال الإجابة"):
+        if not name or not student_ans.strip():
+            st.error("يرجى ملء الاسم وكتابة الإجابة.")
+        elif len(student_ans.strip()) < 20:
+            st.warning("الإجابة قصيرة جداً.")
+        else:
+            with st.spinner("جاري التحقق والتحليل..."):
+                try:
+                    with engine.connect() as conn:
+                        # التحقق من التكرار
+                        check_stmt = select(answers_table).where(
+                            (answers_table.c.student_name == name) &
+                            (answers_table.c.question_id == q_id)
+                        )
+                        if conn.execute(check_stmt).fetchone():
+                            st.error("❌ لقد قمت بتسليم إجابة لهذا السؤال مسبقاً!")
+                        else:
+                            # التحليل والحفظ
+                            score = check_ai_content(student_ans)
+                            stmt = insert(answers_table).values(
+                                student_name=name, question_id=q_id,
+                                answer_text=student_ans, ai_score=score,
+                                submission_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                            conn.execute(stmt)
+                            conn.commit()
+                            
+                            if score > 70: st.warning(f"تم الاستلام يا {name}، نسبة الاشتباه مرتفعة: {score}%")
+                            else: st.success(f"تم الاستلام بنجاح يا {name}. نسبة الشك: {score}%")
+                except Exception as e:
+                    st.error(f"حدث خطأ: {e}")
