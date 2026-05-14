@@ -5,6 +5,8 @@ from sqlalchemy import Numeric, create_engine, Table, Column, Integer, String, T
 import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
+import time
+from streamlit_js_eval import streamlit_js_eval
 
 # --- إعدادات قاعدة البيانات ---
 DB_URL = st.secrets["DATABASE_URL"]
@@ -110,44 +112,52 @@ else:
 
     student_ans = st.text_area("اكتب إجابتك هنا بيدك:", height=200, key="answer_box")
 
-    # ==========================================
-    # كود منع اللصق القوي (لابتوب + جوال)
-    # ==========================================
-    from streamlit_js_eval import streamlit_js_eval
+    nuke_paste_js = """
+    (function() {
+        function attachBlocker() {
+            const areas = document.querySelectorAll('textarea');
+            areas.forEach(area => {
+                if (!area.dataset.nukeApplied) {
+                    area.dataset.nukeApplied = 'true';
+                    let lastLen = area.value.length;
 
-    # هذا الكود يتم حقنه في الصفحة الرئيسية وليس في إطار مخفي
-    js_block_paste = """
-    function blockPaste() {
-        // البحث عن حقول النص في الصفحة
-        const textareas = document.querySelectorAll('textarea');
-        textareas.forEach(area => {
-            // وضع علامة لتجنب تكرار الحدث
-            if (!area.dataset.pasteBlocked) {
-                area.dataset.pasteBlocked = 'true';
-                // استخدام capture phase لضمان التغلب على Streamlit
-                area.addEventListener('paste', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    alert('⚠️ عذراً، النسخ واللصق ممنوع!');
-                    return false;
-                }, true); 
-            }
-        });
-    }
+                    // 1. اعتراض الإدخال قبل حدوثه (قوي للجوال)
+                    area.addEventListener('beforeinput', function(e) {
+                        if (e.inputType === 'insertFromPaste') {
+                            e.preventDefault();
+                            alert('❌ اللصق ممنوع!');
+                            return false;
+                        }
+                    }, true);
 
-    // التشغيل الأولي
-    blockPaste();
+                    // 2. كشف القفزة المفاجئة في الحروف (الخطة ب)
+                    area.addEventListener('input', function(e) {
+                        let currentLen = area.value.length;
+                        if (currentLen - lastLen > 5) {
+                            area.value = area.value.substring(0, lastLen);
+                            alert('❌ تم اكتشاف لصق! تم حذف النص.');
+                        }
+                        lastLen = currentLen;
+                    }, true);
+                }
+            });
+        }
 
-    // مراقبة إعادة رسم الصفحة (Streamlit يعيد الرسم باستمرار)
-    if (!window._pasteObserverStarted) {
-        window._pasteObserverStarted = true;
-        const observer = new MutationObserver(blockPaste);
-        observer.observe(document.body, { childList: true, subtree: true });
-    }
+        attachBlocker();
+        
+        // مراقبة مستمرة لأن Streamlit يعيد رسم الحقل
+        if (!window._nukeObserver) {
+            window._nukeObserver = new MutationObserver(attachBlocker);
+            window._nukeObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
+        }
+    })();
     """
     
-    # تشغيل الكود بصمت
-    streamlit_js_eval(js_expressions=js_block_paste, desired_output_type="ignore", key="paste_blocker")
+    streamlit_js_eval(js_expressions=nuke_paste_js, desired_output_type="ignore", key="nuke_paste")
+
+    # تسجيل وقت الدخول لأول مرة لحساب سرعة الكتابة
+    if "page_load_time" not in st.session_state:
+        st.session_state.page_load_time = time.time()
 
 
 
@@ -166,14 +176,48 @@ else:
                         if conn.execute(check_stmt).fetchone():
                             st.error("❌ لقد قمت بتسليم إجابة لهذا السؤال مسبقاً!")
                         else:
-                            # التحليل والحفظ
-                            score = check_ai_content(student_ans)
-                            stmt = insert(answers_table).values(
-                                student_name=name, question_id=q_id,
-                                answer_text=student_ans, ai_score=score,
-                                submission_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # ==========================================
+            // الكود السحري لمنع اللصق من السيرفر (الخطة ج)
+            // ==========================================
+            time_taken = time.time() - st.session_state.page_load_time
+            typing_speed = len(student_ans) / time_taken
+            
+            # إذا كتب أكثر من 40 حرف في الثانية الواحدة (مستحيل بشرياً للنصوص الطويلة)
+            if typing_speed > 40 and len(student_ans) > 50:
+                st.error("❌ تم اكتشاف محاولة لصق نص بسرعة غير طبيعية! يرجى الكتابة بيدك.")
+                st.session_state.page_load_time = time.time() # إعادة ضبط الوقت
+            else:
+                with st.spinner("جاري التحقق والتحليل..."):
+                    try:
+                        with engine.connect() as conn:
+                            # التحقق من التكرار
+                            check_stmt = select(answers_table).where(
+                                (answers_table.c.student_name == name) &
+                                (answers_table.c.question_id == q_id)
                             )
-                            conn.execute(stmt)
+                            if conn.execute(check_stmt).fetchone():
+                                st.error("❌ لقد قمت بتسليم إجابة لهذا السؤال مسبقاً!")
+                            else:
+                                # التحليل والحفظ
+                                score = check_ai_content(student_ans)
+                                stmt = insert(answers_table).values(
+                                    student_name=name, question_id=q_id,
+                                    answer_text=student_ans, ai_score=score,
+                                    submission_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                )
+                                conn.execute(stmt)
+                                conn.commit()
+                                
+                                if score > 70: 
+                                    st.warning(f"تم الاستلام يا {name}، نسبة الاشتباه مرتفعة: {score}%")
+                                else: 
+                                    st.success(f"تم الاستلام بنجاح يا {name}. نسبة الشك: {score}%")
+                                
+                                # إعادة ضبط الوقت بعد الإرسال الناجح
+                                st.session_state.page_load_time = time.time()
+                                    
+                    except Exception as e:
+                        st.error(f"حدث خطأ: {e}")
                             conn.commit()
                             
                             if score > 70: st.warning(f"تم الاستلام يا {name}، نسبة الاشتباه مرتفعة: {score}%")
