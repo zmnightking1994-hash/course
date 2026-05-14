@@ -100,8 +100,8 @@ if role == "teacher":
         st.info(f"**الطالب:** {student_data['اسم الطالب']}\n\n**السؤال:** {student_data['رقم السؤال']}\n\n**نسبة الـ AI:** {student_data['نسبة AI %']}%\n\n**الإجابة:**\n{student_data['الإجابة']}")
 
 else:
-    # ==========================================
-    # واجهة الطالب (الكود السابق)
+        # ==========================================
+    # واجهة الطالب
     # ==========================================
     st.title("📝 نظام استلام الإجابات")
 
@@ -110,9 +110,46 @@ else:
 
     student_ans = st.text_area("اكتب إجابتك هنا بيدك:", height=200, key="answer_box")
 
-    # كود منع اللصق
-    anti_paste_js = """<script>var textareas = window.parent.document.querySelectorAll('textarea');textareas.forEach(function(area){area.addEventListener('paste',function(e){e.preventDefault();alert('النسخ ممنوع!');},false);});</script>"""
-    components.html(anti_paste_js, height=0)
+    # ==========================================
+    # كود منع اللصق القوي (لابتوب + جوال)
+    # ==========================================
+    from streamlit_js_eval import streamlit_js_eval
+
+    # هذا الكود يتم حقنه في الصفحة الرئيسية وليس في إطار مخفي
+    js_block_paste = """
+    function blockPaste() {
+        // البحث عن حقول النص في الصفحة
+        const textareas = document.querySelectorAll('textarea');
+        textareas.forEach(area => {
+            // وضع علامة لتجنب تكرار الحدث
+            if (!area.dataset.pasteBlocked) {
+                area.dataset.pasteBlocked = 'true';
+                // استخدام capture phase لضمان التغلب على Streamlit
+                area.addEventListener('paste', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    alert('⚠️ عذراً، النسخ واللصق ممنوع!');
+                    return false;
+                }, true); 
+            }
+        });
+    }
+
+    // التشغيل الأولي
+    blockPaste();
+
+    // مراقبة إعادة رسم الصفحة (Streamlit يعيد الرسم باستمرار)
+    if (!window._pasteObserverStarted) {
+        window._pasteObserverStarted = true;
+        const observer = new MutationObserver(blockPaste);
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+    """
+    
+    # تشغيل الكود بصمت
+    streamlit_js_eval(js_expressions=js_block_paste, desired_output_type="ignore", key="paste_blocker")
+
+
 
     if st.button("إرسال الإجابة"):
         if not name or not student_ans.strip():
